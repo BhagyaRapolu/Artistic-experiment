@@ -30,10 +30,6 @@ const dbHelper = {
       const db = await dbHelper.getDB();
       const tx = db.transaction(STORE_NAME, 'readwrite');
       tx.objectStore(STORE_NAME).put(history, 'current_history');
-      return new Promise((resolve, reject) => {
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => reject(tx.error);
-      });
     } catch (e) {
       console.error("Persistence Error:", e);
     }
@@ -71,7 +67,6 @@ const App: React.FC = () => {
   const [pendingAspectRatio, setPendingAspectRatio] = useState<AspectRatio>("1:1");
   const [isCacheHit, setIsCacheHit] = useState(false);
   
-  // Track the ID of the latest request to ignore responses from stale (canceled) requests
   const latestRequestId = useRef(0);
   const isInitialized = useRef(false);
   const displayRef = useRef<HTMLDivElement>(null);
@@ -103,12 +98,11 @@ const App: React.FC = () => {
     
     setErrorDetails(null);
     setIsCacheHit(false);
-    const displaySubject = subject.trim() || (base64Image ? "Visual Re-imagination" : "Abstract Creation");
+    const displaySubject = subject.trim() || (base64Image ? "Re-imagined Study" : "Creative Genesis");
     setPendingPrompt(displaySubject);
     setPendingStyle(style);
     setPendingAspectRatio(aspectRatio);
 
-    // 1. Efficient History Lookup (O(1) in the best case if we used a Map, but O(N) is fine for N=15)
     const cachedItem = history.find(item => 
       item.prompt.toLowerCase() === displaySubject.toLowerCase() && 
       item.style === style && 
@@ -134,7 +128,6 @@ const App: React.FC = () => {
         imageUrl = await generatePortrait(displaySubject, style, aspectRatio);
       }
       
-      // If a newer request has started, silently drop this result to avoid UI flicker
       if (requestId !== latestRequestId.current) return;
 
       setStatus(GenerationStatus.LOADING_INSPIRATION);
@@ -159,39 +152,39 @@ const App: React.FC = () => {
 
       setTimeout(() => {
         displayRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
+      }, 150);
       
     } catch (error: any) {
       if (requestId !== latestRequestId.current) return;
       
-      console.error("Artistic process failed:", error);
+      console.error("Artistic failure:", error);
       setStatus(GenerationStatus.ERROR);
       
       const errorMsg = error.message || "";
       setErrorDetails({
-        message: errorMsg.includes('safety') 
-          ? "The prompt was flagged by artistic moderation. Try adjusting your description." 
-          : "We encountered a temporary canvas block. Please check your connection and try again.",
-        canRetry: !errorMsg.includes('safety') && !errorMsg.includes('moderation'),
+        message: errorMsg === 'moderated_content' ? 'moderated_content' : 'technical_error',
+        canRetry: errorMsg !== 'moderated_content',
       });
     }
   }, [history]);
 
   const handleSurpriseMe = useCallback(async (style: ArtStyle) => {
+    const requestId = ++latestRequestId.current;
     try {
       setErrorDetails(null);
       setStatus(GenerationStatus.GENERATING_IDEA);
       const subject = await generateRandomSubject();
+      
+      if (requestId !== latestRequestId.current) return;
+      
       setPendingPrompt(subject);
       setPendingStyle(style);
       await handleGenerate(subject, style, pendingAspectRatio);
       return subject;
     } catch (error: any) {
+      if (requestId !== latestRequestId.current) return;
       setStatus(GenerationStatus.ERROR);
-      setErrorDetails({
-        message: "Failed to find inspiration. Please try again.",
-        canRetry: true
-      });
+      setErrorDetails({ message: "idea_failed", canRetry: true });
     }
   }, [handleGenerate, pendingAspectRatio]);
 
@@ -215,7 +208,7 @@ const App: React.FC = () => {
   };
 
   const handleClearHistory = async () => {
-    if(confirm("Permanently clear your studio gallery?")) {
+    if(confirm("Permanently archive the current vault?")) {
       setHistory([]);
       setPortrait(null);
       setStatus(GenerationStatus.IDLE);
@@ -227,14 +220,12 @@ const App: React.FC = () => {
     <div className="min-h-screen flex flex-col selection:bg-amber-100 selection:text-amber-900">
       <main className="flex-grow">
         <Header />
-        
         <PromptInput 
           onGenerate={handleGenerate}
           onSurpriseMe={handleSurpriseMe}
           isLoading={status !== GenerationStatus.IDLE && status !== GenerationStatus.SUCCESS && status !== GenerationStatus.ERROR} 
           initialValue={pendingPrompt}
         />
-        
         <div ref={displayRef}>
           <PortraitDisplay 
             portrait={portrait} 
@@ -246,7 +237,6 @@ const App: React.FC = () => {
             isCacheHit={isCacheHit}
           />
         </div>
-
         {history.length > 0 && (
           <HistoryList 
             history={history} 
@@ -255,12 +245,9 @@ const App: React.FC = () => {
           />
         )}
       </main>
-
-      <footer className="py-12 text-center text-slate-300 text-[10px] tracking-[0.5em] uppercase mt-20">
-        <p>© {new Date().getFullYear()} Atelier Muse Studio</p>
+      <footer className="py-16 text-center text-slate-300 text-[10px] tracking-[0.5em] uppercase mt-20">
+        <p>© {new Date().getFullYear()} Atelier Muse Fine Art Studio</p>
       </footer>
-
-      {/* Atmospheric Background Elements */}
       <div className="fixed -bottom-40 -left-40 w-[600px] h-[600px] bg-amber-50/20 rounded-full blur-[120px] pointer-events-none -z-10 animate-pulse"></div>
       <div className="fixed -top-40 -right-40 w-[600px] h-[600px] bg-rose-50/20 rounded-full blur-[120px] pointer-events-none -z-10 animate-pulse delay-1000"></div>
     </div>

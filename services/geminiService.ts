@@ -40,7 +40,7 @@ export async function generateRandomSubject(): Promise<string> {
     
     const response = await ai.models.generateContent({
       model: 'gemini-3-flash-preview',
-      contents: `Imagine a world-class artist's sketchbook. Convert "${baseIdea}" into a 12-word evocative prompt. No quotes.`,
+      contents: `You are a creative muse for a master painter. Convert the concept "${baseIdea}" into a 12-word sensory-rich prompt. Focus on light, texture, and mood. No quotes.`,
       config: { temperature: 0.9 }
     });
 
@@ -59,7 +59,7 @@ export async function generatePortrait(subject: string, style: ArtStyle, aspectR
   const promise = withRetry(async () => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const modifiers = STYLE_MODIFIERS[style];
-    const fullPrompt = `${subject}, fine art ${style.toLowerCase()}, ${modifiers}, masterpiece, professional composition, 8k resolution`;
+    const fullPrompt = `A masterful ${style.toLowerCase()} painting of ${subject}. ${modifiers}. Use professional artistic composition, dramatic lighting, and museum-quality textures.`;
     
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -80,16 +80,16 @@ export async function generatePortrait(subject: string, style: ArtStyle, aspectR
     throw new Error("no_image_data");
   }).finally(() => pendingRequests.delete(cacheKey));
 
+  // Fix: Use cacheKey instead of undefined requestId to track pending requests
   pendingRequests.set(cacheKey, promise);
   return promise;
 }
 
 export async function editImage(base64Image: string, prompt: string, style: ArtStyle, aspectRatio: AspectRatio): Promise<string> {
-  const requestId = `edit_${Date.now()}`;
   const promise = withRetry(async () => {
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const modifiers = STYLE_MODIFIERS[style];
-    const fullPrompt = `Re-imagine this artwork in the style of ${style}: ${modifiers}. ${prompt ? `Apply these changes: ${prompt}` : ''}`;
+    const fullPrompt = `Re-imagine this piece as a ${style.toLowerCase()}: ${modifiers}. ${prompt ? `Modifications: ${prompt}` : ''}. Maintain the core soul of the image but apply the specific physical properties of ${style}.`;
     
     const response = await ai.models.generateContent({
       model: 'gemini-2.5-flash-image',
@@ -125,7 +125,12 @@ export async function generateInspirationNotes(imageUrl: string, subject: string
       contents: {
         parts: [
           { inlineData: { data: imageUrl.split(',')[1], mimeType: 'image/png' } },
-          { text: `Analyze this ${style} painting of "${subject}". Provide technical notes for an artist in JSON.` },
+          { text: `You are a world-renowned art critic and professor. Analyze this ${style} study of "${subject}". 
+          1. Technique: Describe the specific brushwork or tool usage (e.g., 'wet-on-wet washes', 'heavy impasto'). 
+          2. Palette: List 4 specific pigments used (e.g., 'Burnt Sienna', 'Prussian Blue'). 
+          3. Mood: The emotional weight. 
+          4. Challenge: One technical hurdle a student would face mimicking this. 
+          Format as JSON.` },
         ],
       },
       config: {
