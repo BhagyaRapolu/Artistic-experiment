@@ -1,24 +1,75 @@
 
-import React, { useState, useRef } from 'react';
-import { ArtStyle } from '../types';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { ArtStyle, AspectRatio } from '../types';
 
 interface PromptInputProps {
-  onGenerate: (subject: string, style: ArtStyle, image?: string) => void;
+  onGenerate: (subject: string, style: ArtStyle, aspectRatio: AspectRatio, image?: string) => void;
   onSurpriseMe: (style: ArtStyle) => Promise<string | void>;
   isLoading: boolean;
+  initialValue?: string;
 }
 
-const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isLoading }) => {
-  const [subject, setSubject] = useState('');
+const ASPECT_RATIOS: { value: AspectRatio; label: string; icon: React.ReactNode }[] = [
+  { value: "1:1", label: "Square", icon: <div className="w-3 h-3 border-2 border-current rounded-sm" /> },
+  { value: "4:3", label: "Classic", icon: <div className="w-4 h-3 border-2 border-current rounded-sm" /> },
+  { value: "16:9", label: "Wide", icon: <div className="w-5 h-2.5 border-2 border-current rounded-sm" /> },
+  { value: "3:4", label: "Portrait", icon: <div className="w-2.5 h-3.5 border-2 border-current rounded-sm" /> },
+  { value: "9:16", label: "Tall", icon: <div className="w-2 h-4 border-2 border-current rounded-sm" /> },
+];
+
+const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isLoading, initialValue }) => {
+  const [subject, setSubject] = useState(initialValue || '');
   const [style, setStyle] = useState<ArtStyle>(ArtStyle.WATERCOLOR);
+  const [aspectRatio, setAspectRatio] = useState<AspectRatio>("1:1");
   const [isFocused, setIsFocused] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (initialValue && !subject) {
+      setSubject(initialValue);
+    }
+  }, [initialValue]);
+
+  const processFile = (file: File) => {
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setUploadedImage(event.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const item = e.clipboardData.items[0];
+    if (item?.type.startsWith('image/')) {
+      const file = item.getAsFile();
+      if (file) processFile(file);
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (subject.trim() || uploadedImage) {
-      onGenerate(subject, style, uploadedImage || undefined);
+      onGenerate(subject, style, aspectRatio, uploadedImage || undefined);
     }
   };
 
@@ -31,13 +82,7 @@ const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isL
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        setUploadedImage(event.target?.result as string);
-      };
-      reader.readAsDataURL(file);
-    }
+    if (file) processFile(file);
   };
 
   const clearImage = () => {
@@ -47,8 +92,8 @@ const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isL
 
   return (
     <div className="w-full max-w-5xl mx-auto mb-12 px-4">
-      <form onSubmit={handleSubmit} className="flex flex-col gap-6">
-        {/* Style Selector - Optimized for 16 styles */}
+      <form onSubmit={handleSubmit} className="flex flex-col gap-8">
+        {/* Style Selection */}
         <div className="flex flex-wrap justify-center gap-2 max-w-4xl mx-auto">
           {Object.values(ArtStyle).map((s) => (
             <button
@@ -67,38 +112,73 @@ const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isL
           ))}
         </div>
 
-        {/* The Command Card */}
-        <div className="relative">
+        {/* Aspect Ratio Selection */}
+        <div className="flex justify-center gap-4">
+          <div className="bg-white/40 backdrop-blur-sm p-1.5 rounded-2xl border border-slate-100 shadow-sm flex items-center gap-1">
+            {ASPECT_RATIOS.map((ar) => (
+              <button
+                key={ar.value}
+                type="button"
+                onClick={() => setAspectRatio(ar.value)}
+                disabled={isLoading}
+                title={ar.label}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all duration-200 ${
+                  aspectRatio === ar.value
+                    ? 'bg-white text-slate-900 shadow-md ring-1 ring-slate-200'
+                    : 'text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                {ar.icon}
+                <span className="text-[10px] font-black tracking-widest uppercase">{ar.value}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Main Input Field with Drag & Drop */}
+        <div 
+          className="relative"
+          onDrop={handleDrop}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onPaste={handlePaste}
+        >
           <div className={`
             flex flex-col sm:flex-row items-center gap-0 
             bg-white rounded-[2.5rem] border transition-all duration-500 overflow-hidden
-            ${isFocused ? 'border-amber-300 shadow-2xl ring-4 ring-amber-50/50' : 'border-slate-100 shadow-xl shadow-slate-200/50'}
+            ${isFocused || isDragging ? 'border-amber-300 shadow-2xl ring-4 ring-amber-50/50' : 'border-slate-100 shadow-xl shadow-slate-200/50'}
+            ${isDragging ? 'bg-amber-50/30 scale-[1.01]' : ''}
           `}>
             <div className="flex-grow flex items-center w-full min-h-[76px]">
-              {/* Image Upload Trigger / Preview */}
               <div className="pl-6 flex items-center">
                 {uploadedImage ? (
-                  <div className="relative group w-12 h-12">
-                    <img src={uploadedImage} alt="Reference" className="w-full h-full object-cover rounded-xl ring-2 ring-amber-100" />
+                  <div className="relative group w-14 h-14">
+                    <img src={uploadedImage} alt="Reference" className="w-full h-full object-cover rounded-xl ring-2 ring-amber-200 shadow-md" />
                     <button 
                       type="button" 
                       onClick={clearImage}
-                      className="absolute -top-2 -right-2 bg-rose-500 text-white rounded-full p-0.5 shadow-md opacity-0 group-hover:opacity-100 transition-opacity"
+                      className="absolute -top-2 -right-2 bg-rose-500 text-white rounded-full p-1 shadow-md opacity-0 group-hover:opacity-100 transition-opacity"
+                      title="Remove Reference"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     </button>
+                    <div className="absolute -bottom-1 -right-1 bg-amber-400 text-[8px] text-white font-black uppercase px-1 rounded shadow-sm">Ref</div>
                   </div>
                 ) : (
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={isLoading}
-                    className="p-3 text-slate-300 hover:text-amber-500 transition-colors bg-slate-50 rounded-2xl border border-dashed border-slate-200"
-                    title="Upload reference image"
+                    className={`
+                      p-4 text-slate-300 hover:text-amber-500 hover:bg-amber-50 hover:border-amber-200 
+                      transition-all bg-slate-50/50 rounded-2xl border border-dashed border-slate-200
+                      ${isDragging ? 'border-amber-400 text-amber-500 bg-amber-50' : ''}
+                    `}
+                    title="Upload or Drag Reference Image"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
                   </button>
@@ -118,7 +198,7 @@ const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isL
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => setIsFocused(false)}
                 onChange={(e) => setSubject(e.target.value)}
-                placeholder={uploadedImage ? "Describe changes or style details..." : `Envision your ${style.toLowerCase()}...`}
+                placeholder={uploadedImage ? "Describe transformation or artistic shifts..." : isDragging ? "Drop your muse here..." : `Envision your ${style.toLowerCase()}... (Paste image here)`}
                 className="w-full bg-transparent px-5 py-6 text-lg sm:text-xl font-serif italic text-slate-700 placeholder:text-slate-300 focus:outline-none"
                 disabled={isLoading}
               />
@@ -150,9 +230,15 @@ const PromptInput: React.FC<PromptInputProps> = ({ onGenerate, onSurpriseMe, isL
               )}
             </button>
           </div>
+          {isDragging && (
+            <div className="absolute inset-0 z-10 pointer-events-none flex items-center justify-center">
+              <div className="bg-amber-400 text-white font-black uppercase tracking-[0.3em] px-8 py-4 rounded-full shadow-2xl animate-bounce">
+                Drop Image
+              </div>
+            </div>
+          )}
         </div>
         
-        {/* Infinite Inspiration Trigger */}
         <div className="flex justify-center -mt-2">
           <button
             type="button"

@@ -4,7 +4,7 @@ import Header from './components/Header';
 import PromptInput from './components/PromptInput';
 import PortraitDisplay from './components/PortraitDisplay';
 import HistoryList from './components/HistoryList';
-import { GeneratedPortrait, GenerationStatus, ArtStyle } from './types';
+import { GeneratedPortrait, GenerationStatus, ArtStyle, ErrorDetails, AspectRatio } from './types';
 import { generatePortrait, generateInspirationNotes, generateRandomSubject, editImage } from './services/geminiService';
 
 const DB_NAME = 'AtelierMuseDB';
@@ -35,7 +35,7 @@ const dbHelper = {
         tx.onerror = () => reject(tx.error);
       });
     } catch (e) {
-      console.error("IndexedDB Save Error:", e);
+      console.error("Persistence Error:", e);
     }
   },
   load: async (): Promise<GeneratedPortrait[]> => {
@@ -49,7 +49,6 @@ const dbHelper = {
         request.onerror = () => resolve([]);
       });
     } catch (e) {
-      console.error("IndexedDB Load Error:", e);
       return [];
     }
   },
@@ -58,9 +57,7 @@ const dbHelper = {
       const db = await dbHelper.getDB();
       const tx = db.transaction(STORE_NAME, 'readwrite');
       tx.objectStore(STORE_NAME).delete('current_history');
-    } catch (e) {
-      console.error("IndexedDB Clear Error:", e);
-    }
+    } catch (e) {}
   }
 };
 
@@ -68,8 +65,14 @@ const App: React.FC = () => {
   const [portrait, setPortrait] = useState<GeneratedPortrait | null>(null);
   const [history, setHistory] = useState<GeneratedPortrait[]>([]);
   const [status, setStatus] = useState<GenerationStatus>(GenerationStatus.IDLE);
+  const [errorDetails, setErrorDetails] = useState<ErrorDetails | null>(null);
   const [pendingPrompt, setPendingPrompt] = useState<string>('');
   const [pendingStyle, setPendingStyle] = useState<ArtStyle | null>(null);
+  const [pendingAspectRatio, setPendingAspectRatio] = useState<AspectRatio>("1:1");
+  const [isCacheHit, setIsCacheHit] = useState(false);
+  
+  // Track the ID of the latest request to ignore responses from stale (canceled) requests
+  const latestRequestId = useRef(0);
   const isInitialized = useRef(false);
   const displayRef = useRef<HTMLDivElement>(null);
 
@@ -82,6 +85,7 @@ const App: React.FC = () => {
         setStatus(GenerationStatus.SUCCESS);
         setPendingPrompt(saved[0].prompt);
         setPendingStyle(saved[0].style);
+        setPendingAspectRatio(saved[0].aspectRatio || "1:1");
       }
       isInitialized.current = true;
     };
@@ -94,80 +98,127 @@ const App: React.FC = () => {
     }
   }, [history]);
 
-  const handleGenerate = useCallback(async (subject: string, style: ArtStyle, base64Image?: string) => {
-    // Prevent multiple concurrent generations
-    if (status === GenerationStatus.LOADING_IMAGE || status === GenerationStatus.LOADING_INSPIRATION) return;
+  const handleGenerate = useCallback(async (subject: string, style: ArtStyle, aspectRatio: AspectRatio, base64Image?: string) => {
+    const requestId = ++latestRequestId.current;
+    
+    setErrorDetails(null);
+    setIsCacheHit(false);
+    const displaySubject = subject.trim() || (base64Image ? "Visual Re-imagination" : "Abstract Creation");
+    setPendingPrompt(displaySubject);
+    setPendingStyle(style);
+    setPendingAspectRatio(aspectRatio);
+
+    // 1. Efficient History Lookup (O(1) in the best case if we used a Map, but O(N) is fine for N=15)
+    const cachedItem = history.find(item => 
+      item.prompt.toLowerCase() === displaySubject.toLowerCase() && 
+      item.style === style && 
+      item.aspectRatio === aspectRatio &&
+      !base64Image
+    );
+
+    if (cachedItem) {
+      setPortrait(cachedItem);
+      setStatus(GenerationStatus.SUCCESS);
+      setIsCacheHit(true);
+      displayRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
 
     try {
-      const displaySubject = subject || (base64Image ? "Visual Re-imagination" : "Abstract Creation");
-      setPendingPrompt(displaySubject);
-      setPendingStyle(style);
       setStatus(GenerationStatus.LOADING_IMAGE);
       
-      // Step 1: Generate or Edit the image first
       let imageUrl: string;
       if (base64Image) {
-        imageUrl = await editImage(base64Image, subject, style);
+        imageUrl = await editImage(base64Image, subject, style, aspectRatio);
       } else {
-        imageUrl = await generatePortrait(subject, style);
+        imageUrl = await generatePortrait(displaySubject, style, aspectRatio);
       }
       
-      // Step 2: Now that we have the image, generate multimodal inspiration notes
+      // If a newer request has started, silently drop this result to avoid UI flicker
+      if (requestId !== latestRequestId.current) return;
+
       setStatus(GenerationStatus.LOADING_INSPIRATION);
       const inspiration = await generateInspirationNotes(imageUrl, displaySubject, style);
       
+      if (requestId !== latestRequestId.current) return;
+
       const newPortrait: GeneratedPortrait = {
         imageUrl,
         prompt: displaySubject,
         style,
+        aspectRatio,
         inspiration
       };
       
       setPortrait(newPortrait);
       setHistory(prev => {
-        const filtered = prev.filter(p => p.imageUrl !== imageUrl && p.prompt !== displaySubject);
+        const filtered = prev.filter(p => p.imageUrl !== imageUrl);
         return [newPortrait, ...filtered].slice(0, MAX_HISTORY);
       });
       setStatus(GenerationStatus.SUCCESS);
 
-      // Smooth scroll to results
       setTimeout(() => {
         displayRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 100);
       
-    } catch (error) {
-      console.error("Generation failed:", error);
+    } catch (error: any) {
+      if (requestId !== latestRequestId.current) return;
+      
+      console.error("Artistic process failed:", error);
       setStatus(GenerationStatus.ERROR);
+      
+      const errorMsg = error.message || "";
+      setErrorDetails({
+        message: errorMsg.includes('safety') 
+          ? "The prompt was flagged by artistic moderation. Try adjusting your description." 
+          : "We encountered a temporary canvas block. Please check your connection and try again.",
+        canRetry: !errorMsg.includes('safety') && !errorMsg.includes('moderation'),
+      });
     }
-  }, [status]);
+  }, [history]);
 
   const handleSurpriseMe = useCallback(async (style: ArtStyle) => {
     try {
+      setErrorDetails(null);
       setStatus(GenerationStatus.GENERATING_IDEA);
       const subject = await generateRandomSubject();
       setPendingPrompt(subject);
       setPendingStyle(style);
-      await handleGenerate(subject, style);
+      await handleGenerate(subject, style, pendingAspectRatio);
       return subject;
-    } catch (error) {
-      console.error("Failed to get surprise idea:", error);
+    } catch (error: any) {
       setStatus(GenerationStatus.ERROR);
+      setErrorDetails({
+        message: "Failed to find inspiration. Please try again.",
+        canRetry: true
+      });
     }
-  }, [handleGenerate]);
+  }, [handleGenerate, pendingAspectRatio]);
+
+  const handleRetry = () => {
+    if (pendingPrompt && pendingStyle) {
+      handleGenerate(pendingPrompt, pendingStyle, pendingAspectRatio);
+    }
+  };
 
   const handleSelectHistory = (item: GeneratedPortrait) => {
     setPortrait(item);
     setStatus(GenerationStatus.SUCCESS);
     setPendingPrompt(item.prompt);
     setPendingStyle(item.style);
+    setPendingAspectRatio(item.aspectRatio || "1:1");
+    setErrorDetails(null);
+    setIsCacheHit(true);
     setTimeout(() => {
       displayRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 50);
   };
 
   const handleClearHistory = async () => {
-    if(confirm("Are you sure you want to clear your artistic gallery history?")) {
+    if(confirm("Permanently clear your studio gallery?")) {
       setHistory([]);
+      setPortrait(null);
+      setStatus(GenerationStatus.IDLE);
       await dbHelper.clear();
     }
   };
@@ -181,6 +232,7 @@ const App: React.FC = () => {
           onGenerate={handleGenerate}
           onSurpriseMe={handleSurpriseMe}
           isLoading={status !== GenerationStatus.IDLE && status !== GenerationStatus.SUCCESS && status !== GenerationStatus.ERROR} 
+          initialValue={pendingPrompt}
         />
         
         <div ref={displayRef}>
@@ -189,6 +241,9 @@ const App: React.FC = () => {
             status={status} 
             pendingPrompt={pendingPrompt}
             pendingStyle={pendingStyle}
+            errorDetails={errorDetails}
+            onRetry={handleRetry}
+            isCacheHit={isCacheHit}
           />
         </div>
 
@@ -205,8 +260,9 @@ const App: React.FC = () => {
         <p>© {new Date().getFullYear()} Atelier Muse Studio</p>
       </footer>
 
-      <div className="fixed -bottom-40 -left-40 w-[600px] h-[600px] bg-amber-50/20 rounded-full blur-[120px] pointer-events-none -z-10"></div>
-      <div className="fixed -top-40 -right-40 w-[600px] h-[600px] bg-rose-50/20 rounded-full blur-[120px] pointer-events-none -z-10"></div>
+      {/* Atmospheric Background Elements */}
+      <div className="fixed -bottom-40 -left-40 w-[600px] h-[600px] bg-amber-50/20 rounded-full blur-[120px] pointer-events-none -z-10 animate-pulse"></div>
+      <div className="fixed -top-40 -right-40 w-[600px] h-[600px] bg-rose-50/20 rounded-full blur-[120px] pointer-events-none -z-10 animate-pulse delay-1000"></div>
     </div>
   );
 };

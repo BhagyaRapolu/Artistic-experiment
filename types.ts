@@ -18,6 +18,8 @@ export enum ArtStyle {
   DIGITAL_ART = 'Digital Art'
 }
 
+export type AspectRatio = "1:1" | "3:4" | "4:3" | "9:16" | "16:9";
+
 export interface Inspiration {
   technique: string;
   palette: string[];
@@ -29,6 +31,7 @@ export interface GeneratedPortrait {
   imageUrl: string;
   prompt: string;
   style: ArtStyle;
+  aspectRatio: AspectRatio;
   inspiration: Inspiration;
 }
 
@@ -39,4 +42,10 @@ export enum GenerationStatus {
   LOADING_INSPIRATION = 'LOADING_INSPIRATION',
   SUCCESS = 'SUCCESS',
   ERROR = 'ERROR'
+}
+
+export interface ErrorDetails {
+  message: string;
+  code?: string;
+  canRetry: boolean;
 }

@@ -1,146 +1,152 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { Inspiration, ArtStyle } from "../types";
+import { Inspiration, ArtStyle, AspectRatio } from "../types";
 import { STYLE_MODIFIERS, DEFAULT_SUBJECTS } from "../constants";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+const sessionCache = new Map<string, any>();
+const pendingRequests = new Map<string, Promise<any>>();
+
+async function withRetry<T>(fn: () => Promise<T>, retries = 3, delay = 1000): Promise<T> {
+  try {
+    return await fn();
+  } catch (error: any) {
+    const errorMsg = error?.message?.toLowerCase() || "";
+    const status = error?.status;
+    const isPermanent = retries <= 0 || status === 400 || errorMsg.includes('safety') || errorMsg.includes('filtered');
+
+    if (isPermanent) {
+      if (errorMsg.includes('safety') || errorMsg.includes('filtered')) {
+        throw new Error("moderated_content");
+      }
+      throw error;
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+    return withRetry(fn, retries - 1, delay * 2);
+  }
+}
+
+const getCacheKey = (prefix: string, parts: any[]) => {
+  return `${prefix}_${parts.map(p => typeof p === 'string' ? p.trim().toLowerCase() : JSON.stringify(p)).join('_')}`;
+};
 
 export async function generateRandomSubject(): Promise<string> {
-  const baseIdea = DEFAULT_SUBJECTS[Math.floor(Math.random() * DEFAULT_SUBJECTS.length)];
-  
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: `Transform this simple painting idea into a rich, evocative, and highly descriptive artistic prompt: "${baseIdea}". 
-    Describe the lighting, atmospheric mood, and specific fine details that would make a beautiful painting. 
-    Keep the output under 25 words. Do not use quotes or introductory text.`,
-    config: {
-      temperature: 0.8,
-    }
-  });
+  const requestId = 'random_subject_gen';
+  if (pendingRequests.has(requestId)) return pendingRequests.get(requestId);
 
-  if (!response.text) return baseIdea;
-  return response.text.trim().replace(/^["'*]+|["'*]+$/g, '');
+  const promise = withRetry(async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const baseIdea = DEFAULT_SUBJECTS[Math.floor(Math.random() * DEFAULT_SUBJECTS.length)];
+    
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: `Imagine a world-class artist's sketchbook. Convert "${baseIdea}" into a 12-word evocative prompt. No quotes.`,
+      config: { temperature: 0.9 }
+    });
+
+    return response.text?.trim().replace(/^["'*]+|["'*]+$/g, '') || baseIdea;
+  }).finally(() => pendingRequests.delete(requestId));
+
+  pendingRequests.set(requestId, promise);
+  return promise;
 }
 
-export async function generatePortrait(subject: string, style: ArtStyle): Promise<string> {
-  const modifiers = STYLE_MODIFIERS[style];
-  const fullPrompt = `${subject}, ${modifiers}`;
-  
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [{ text: fullPrompt }]
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "1:1"
+export async function generatePortrait(subject: string, style: ArtStyle, aspectRatio: AspectRatio): Promise<string> {
+  const cacheKey = getCacheKey('img', [subject, style, aspectRatio]);
+  if (sessionCache.has(cacheKey)) return sessionCache.get(cacheKey);
+  if (pendingRequests.has(cacheKey)) return pendingRequests.get(cacheKey);
+
+  const promise = withRetry(async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const modifiers = STYLE_MODIFIERS[style];
+    const fullPrompt = `${subject}, fine art ${style.toLowerCase()}, ${modifiers}, masterpiece, professional composition, 8k resolution`;
+    
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: { parts: [{ text: fullPrompt }] },
+      config: { imageConfig: { aspectRatio } }
+    });
+
+    const candidate = response.candidates?.[0];
+    if (!candidate) throw new Error("empty_response");
+
+    for (const part of candidate.content.parts) {
+      if (part.inlineData) {
+        const dataUrl = `data:image/png;base64,${part.inlineData.data}`;
+        sessionCache.set(cacheKey, dataUrl);
+        return dataUrl;
       }
     }
-  });
+    throw new Error("no_image_data");
+  }).finally(() => pendingRequests.delete(cacheKey));
 
-  const candidate = response.candidates?.[0];
-  if (!candidate) throw new Error("No candidates returned from Gemini API");
-
-  for (const part of candidate.content.parts) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
-    }
-  }
-
-  throw new Error("No image data found in candidate parts");
+  pendingRequests.set(cacheKey, promise);
+  return promise;
 }
 
-export async function editImage(base64Image: string, prompt: string, style: ArtStyle): Promise<string> {
-  const modifiers = STYLE_MODIFIERS[style];
-  const fullPrompt = `Re-imagine the attached image in the following artistic style: ${modifiers}. 
-  ${prompt ? `Additionally, apply these specific creative changes: ${prompt}.` : 'Preserve the core composition while transforming the medium completely.'}`;
-  
-  const base64Data = base64Image.split(',')[1];
-  const mimeType = base64Image.split(',')[0].split(':')[1].split(';')[0];
+export async function editImage(base64Image: string, prompt: string, style: ArtStyle, aspectRatio: AspectRatio): Promise<string> {
+  const requestId = `edit_${Date.now()}`;
+  const promise = withRetry(async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const modifiers = STYLE_MODIFIERS[style];
+    const fullPrompt = `Re-imagine this artwork in the style of ${style}: ${modifiers}. ${prompt ? `Apply these changes: ${prompt}` : ''}`;
+    
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: {
+        parts: [
+          { inlineData: { data: base64Image.split(',')[1], mimeType: 'image/png' } },
+          { text: fullPrompt },
+        ],
+      },
+      config: { imageConfig: { aspectRatio } }
+    });
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.5-flash-image',
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: mimeType,
-          },
-        },
-        { text: fullPrompt },
-      ],
-    },
-    config: {
-      imageConfig: {
-        aspectRatio: "1:1"
-      }
+    const candidate = response.candidates?.[0];
+    if (!candidate) throw new Error("edit_blocked");
+
+    for (const part of candidate.content.parts) {
+      if (part.inlineData) return `data:image/png;base64,${part.inlineData.data}`;
     }
+    throw new Error("edit_failed");
   });
 
-  const candidate = response.candidates?.[0];
-  if (!candidate) throw new Error("No candidates returned from Gemini API");
-
-  for (const part of candidate.content.parts) {
-    if (part.inlineData) {
-      return `data:image/png;base64,${part.inlineData.data}`;
-    }
-  }
-
-  throw new Error("No image data found in candidate parts");
+  return promise;
 }
 
 export async function generateInspirationNotes(imageUrl: string, subject: string, style: ArtStyle): Promise<Inspiration> {
-  // Optimization: Send the actual generated image to Gemini 3 Flash to get a real analysis of the art
-  const base64Data = imageUrl.split(',')[1];
-  const mimeType = imageUrl.split(',')[0].split(':')[1].split(';')[0];
+  const cacheKey = getCacheKey('notes', [subject, style]);
+  if (sessionCache.has(cacheKey)) return sessionCache.get(cacheKey);
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-3-flash-preview',
-    contents: {
-      parts: [
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: mimeType,
+  const promise = withRetry(async () => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-flash-preview',
+      contents: {
+        parts: [
+          { inlineData: { data: imageUrl.split(',')[1], mimeType: 'image/png' } },
+          { text: `Analyze this ${style} painting of "${subject}". Provide technical notes for an artist in JSON.` },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            technique: { type: Type.STRING },
+            palette: { type: Type.ARRAY, items: { type: Type.STRING } },
+            mood: { type: Type.STRING },
+            challenge: { type: Type.STRING }
           },
-        },
-        { 
-          text: `Analyze this newly generated ${style} painting of "${subject}". 
-          Provide technical artistic notes for a student who wants to recreate this specific look. 
-          Be specific about the colors and techniques visible in THIS specific image.`
-        },
-      ],
-    },
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          technique: {
-            type: Type.STRING,
-            description: "A specific brushwork or medium technique seen in the image."
-          },
-          palette: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "3-5 dominant pigment colors identified in the image."
-          },
-          mood: {
-            type: Type.STRING,
-            description: "The emotional resonance of the composition."
-          },
-          challenge: {
-            type: Type.STRING,
-            description: "A difficult aspect of this specific piece to master."
-          }
-        },
-        required: ["technique", "palette", "mood", "challenge"]
+          required: ["technique", "palette", "mood", "challenge"]
+        }
       }
-    }
+    });
+
+    const notes = JSON.parse(response.text || '{}');
+    sessionCache.set(cacheKey, notes);
+    return notes;
   });
 
-  if (!response.text) throw new Error("Empty response from inspiration service");
-  
-  return JSON.parse(response.text.trim());
+  return promise;
 }
