@@ -1,10 +1,21 @@
 
 export enum ArtStyle {
+  PENCIL = 'Pencil',
+  CHARCOAL = 'Charcoal',
+  INK_PEN = 'Ink / Pen',
   WATERCOLOR = 'Watercolor',
-  OIL_PAINT = 'Oil Paint',
   ACRYLIC = 'Acrylic',
-  PENCIL = 'Pencil Drawing',
-  SILHOUETTE = 'Silhouette'
+  OIL = 'Oil',
+  PASTEL = 'Pastel',
+  GOUACHE = 'Gouache',
+  ABSTRACT = 'Abstract',
+  REALISTIC = 'Realistic',
+  MINIMALIST = 'Minimalist',
+  LINE_ART = 'Line Art',
+  SILHOUETTE = 'Silhouette',
+  SKETCH = 'Sketch',
+  CARTOON = 'Cartoon / Stylized',
+  DIGITAL_ART = 'Digital Art'
 }
 
 export interface Inspiration {
@@ -23,6 +34,7 @@ export interface GeneratedPortrait {
 
 export enum GenerationStatus {
   IDLE = 'IDLE',
+  GENERATING_IDEA = 'GENERATING_IDEA',
   LOADING_IMAGE = 'LOADING_IMAGE',
   LOADING_INSPIRATION = 'LOADING_INSPIRATION',
   SUCCESS = 'SUCCESS',
